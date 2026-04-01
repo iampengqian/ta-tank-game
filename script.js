@@ -1,5 +1,9 @@
 const canvas = document.getElementById("game");
 const ctx = canvas.getContext("2d");
+const scoreValue = document.getElementById("scoreValue");
+const bestScoreValue = document.getElementById("bestScoreValue");
+const stageKillsValue = document.getElementById("stageKillsValue");
+const totalKillsValue = document.getElementById("totalKillsValue");
 
 const WIDTH = 480;
 const HEIGHT = 480;
@@ -8,8 +12,12 @@ const TANK_SIZE = 24;
 const BULLET_SIZE = 6;
 const PLAYER_SPEED = 120;
 const BULLET_SPEED = 250;
+const COMBO_WINDOW = 3;
+const COMBO_DISPLAY_TIME = 2;
+const FLOAT_TEXT_TIME = 1;
 const PLAYER_SPAWN = { x: GRID * 9, y: GRID * 17 };
 const BASE_POSITION = { x: GRID * 9, y: GRID * 18 };
+const HIGH_SCORE_KEY = "tank-battle-high-score";
 const ENEMY_SPAWNS = [
   { x: GRID * 1, y: 0 },
   { x: GRID * 9, y: 0 },
@@ -57,7 +65,7 @@ const keys = new Set();
 
 document.addEventListener("keydown", (event) => {
   const code = event.code;
-  if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Space"].includes(code)) {
+  if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Space", "Enter"].includes(code)) {
     event.preventDefault();
   }
   keys.add(code);
@@ -66,6 +74,30 @@ document.addEventListener("keydown", (event) => {
 document.addEventListener("keyup", (event) => {
   keys.delete(event.code);
 });
+
+function loadHighScore() {
+  try {
+    const stored = Number.parseInt(localStorage.getItem(HIGH_SCORE_KEY) ?? "0", 10);
+    return Number.isFinite(stored) ? stored : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function saveHighScore() {
+  try {
+    localStorage.setItem(HIGH_SCORE_KEY, String(game.highScore));
+  } catch {
+    // Ignore localStorage failures in restricted environments.
+  }
+}
+
+function refreshScorePanel() {
+  scoreValue.textContent = String(game.score);
+  bestScoreValue.textContent = String(game.highScore);
+  stageKillsValue.textContent = String(game.stageKills);
+  totalKillsValue.textContent = String(game.totalKills);
+}
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
@@ -124,6 +156,85 @@ function createTank({ x, y, direction, speed, color, fireCooldown, hp, kind, sco
     aiMoveTimer: 0,
     spawnShield: 0,
   };
+}
+
+function createFloatingText(text, x, y, color = "#fff4b1", size = 22) {
+  game.floatingTexts.push({
+    text,
+    x,
+    y,
+    color,
+    size,
+    timeLeft: FLOAT_TEXT_TIME,
+    totalTime: FLOAT_TEXT_TIME,
+  });
+}
+
+function resetCombo() {
+  game.comboMultiplier = 1;
+  game.comboTimer = 0;
+  game.comboDisplayTimer = 0;
+  game.comboPulse = 0;
+}
+
+function addScore(points, floatingPosition = null) {
+  game.score += points;
+  if (game.score > game.highScore) {
+    game.highScore = game.score;
+  }
+  if (floatingPosition) {
+    createFloatingText(
+      `+${points}`,
+      floatingPosition.x,
+      floatingPosition.y,
+      floatingPosition.color,
+      floatingPosition.size
+    );
+  }
+  refreshScorePanel();
+}
+
+function awardStageBonus() {
+  const stageNumber = game.stageIndex + 1;
+  addScore(1000 * stageNumber);
+  if (stageNumber === STAGES.length) {
+    addScore(5000);
+  }
+}
+
+function finalizeRun(result) {
+  if (result === "victory") {
+    game.victory = true;
+  } else {
+    game.gameOver = true;
+  }
+
+  if (!game.finalScoreSaved) {
+    saveHighScore();
+    game.finalScoreSaved = true;
+  }
+  refreshScorePanel();
+}
+
+function registerEnemyKill(enemy) {
+  if (game.comboTimer > 0) {
+    game.comboMultiplier += 1;
+  } else {
+    game.comboMultiplier = 1;
+  }
+
+  game.comboTimer = COMBO_WINDOW;
+  if (game.comboMultiplier > 1) {
+    game.comboDisplayTimer = COMBO_DISPLAY_TIME;
+    game.comboPulse = 0;
+  }
+
+  game.stageKills += 1;
+  game.totalKills += 1;
+  addScore(enemy.score * game.comboMultiplier, {
+    x: enemy.x + enemy.width / 2,
+    y: enemy.y,
+  });
 }
 
 function tileRect(x, y) {
@@ -194,6 +305,7 @@ function buildMap() {
 }
 
 const game = {
+  started: false,
   player: null,
   enemies: [],
   bullets: [],
@@ -205,8 +317,18 @@ const game = {
   gameOver: false,
   victory: false,
   score: 0,
+  highScore: loadHighScore(),
+  stageKills: 0,
+  totalKills: 0,
   lives: 3,
   maxConcurrentEnemies: 4,
+  comboMultiplier: 1,
+  comboTimer: 0,
+  comboDisplayTimer: 0,
+  comboPulse: 0,
+  floatingTexts: [],
+  finalScoreSaved: false,
+  stageRewardGranted: false,
 };
 
 function resetStage(index) {
@@ -219,7 +341,12 @@ function resetStage(index) {
     type,
     delay: i * 0.8,
   }));
+  game.stageMessageTimer = 0;
+  game.stageRewardGranted = false;
+  game.stageKills = 0;
+  resetCombo();
   spawnPlayer();
+  refreshScorePanel();
 }
 
 function spawnPlayer() {
@@ -237,11 +364,15 @@ function spawnPlayer() {
 }
 
 function startNewGame() {
+  game.started = true;
   game.score = 0;
+  game.stageKills = 0;
+  game.totalKills = 0;
   game.lives = 3;
   game.gameOver = false;
   game.victory = false;
-  game.stageMessageTimer = 0;
+  game.floatingTexts = [];
+  game.finalScoreSaved = false;
   resetStage(0);
 }
 
@@ -316,7 +447,8 @@ function spawnEnemy(type) {
   });
   enemy.aiMoveTimer = 0.6;
 
-  if (!game.enemies.some((other) => aabb(rectOf(enemy), rectOf(other))) && !aabb(rectOf(enemy), rectOf(game.player))) {
+  const playerBlocked = game.player ? aabb(rectOf(enemy), rectOf(game.player)) : false;
+  if (!game.enemies.some((other) => aabb(rectOf(enemy), rectOf(other))) && !playerBlocked) {
     game.enemies.push(enemy);
   } else {
     game.pendingSpawns.push({ type, delay: 0.75 });
@@ -438,8 +570,9 @@ function damagePlayer() {
     return;
   }
   game.lives -= 1;
+  resetCombo();
   if (game.lives <= 0) {
-    game.gameOver = true;
+    finalizeRun("gameOver");
     return;
   }
   spawnPlayer();
@@ -485,7 +618,7 @@ function updateBullets(dt) {
 
     if (game.base.alive && aabb(bullet, rectOf(game.base))) {
       game.base.alive = false;
-      game.gameOver = true;
+      finalizeRun("gameOver");
       game.bullets.splice(i, 1);
       continue;
     }
@@ -498,7 +631,7 @@ function updateBullets(dt) {
           enemy.hp -= 1;
           hitEnemy = true;
           if (enemy.hp <= 0) {
-            game.score += enemy.score;
+            registerEnemyKill(enemy);
             game.enemies.splice(j, 1);
           }
           break;
@@ -507,7 +640,7 @@ function updateBullets(dt) {
       if (hitEnemy) {
         game.bullets.splice(i, 1);
       }
-    } else if (aabb(bullet, rectOf(game.player))) {
+    } else if (game.player && aabb(bullet, rectOf(game.player))) {
       damagePlayer();
       game.bullets.splice(i, 1);
     }
@@ -528,12 +661,37 @@ function updateSpawns(dt) {
   }
 }
 
+function updateCombo(dt) {
+  if (game.comboTimer > 0) {
+    game.comboTimer = Math.max(0, game.comboTimer - dt);
+    if (game.comboTimer === 0) {
+      game.comboMultiplier = 1;
+    }
+  }
+
+  if (game.comboDisplayTimer > 0) {
+    game.comboDisplayTimer = Math.max(0, game.comboDisplayTimer - dt);
+    game.comboPulse += dt;
+  }
+}
+
+function updateFloatingTexts(dt) {
+  for (let i = game.floatingTexts.length - 1; i >= 0; i -= 1) {
+    const text = game.floatingTexts[i];
+    text.timeLeft -= dt;
+    text.y -= 32 * dt;
+    if (text.timeLeft <= 0) {
+      game.floatingTexts.splice(i, 1);
+    }
+  }
+}
+
 function updateStageState(dt) {
   if (game.stageMessageTimer > 0) {
     game.stageMessageTimer -= dt;
     if (game.stageMessageTimer <= 0) {
       if (game.stageIndex === STAGES.length - 1) {
-        game.victory = true;
+        finalizeRun("victory");
       } else {
         resetStage(game.stageIndex + 1);
       }
@@ -541,12 +699,31 @@ function updateStageState(dt) {
     return;
   }
 
-  if (game.pendingSpawns.length === 0 && game.enemies.length === 0 && !game.victory && !game.gameOver) {
+  if (
+    game.pendingSpawns.length === 0 &&
+    game.enemies.length === 0 &&
+    !game.victory &&
+    !game.gameOver &&
+    !game.stageRewardGranted
+  ) {
+    game.stageRewardGranted = true;
+    awardStageBonus();
     game.stageMessageTimer = 2;
+    resetCombo();
   }
 }
 
 function update(dt) {
+  if (!game.started) {
+    if (keys.has("Enter")) {
+      startNewGame();
+    }
+    return;
+  }
+
+  updateCombo(dt);
+  updateFloatingTexts(dt);
+
   if (game.gameOver || game.victory) {
     if (keys.has("Enter")) {
       startNewGame();
@@ -653,6 +830,42 @@ function drawBullets() {
   }
 }
 
+function drawFloatingTexts() {
+  ctx.save();
+  ctx.textAlign = "center";
+  for (const text of game.floatingTexts) {
+    const alpha = clamp(text.timeLeft / text.totalTime, 0, 1);
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = text.color;
+    ctx.font = `bold ${text.size}px Trebuchet MS`;
+    ctx.fillText(text.text, text.x, text.y);
+  }
+  ctx.restore();
+}
+
+function drawComboIndicator() {
+  if (game.comboDisplayTimer <= 0 || game.comboMultiplier <= 1) {
+    return;
+  }
+
+  const fade = game.comboDisplayTimer < 0.35 ? game.comboDisplayTimer / 0.35 : 1;
+  const pulseProgress = Math.min(game.comboPulse / 0.35, 1);
+  const scale = 0.9 + Math.sin(pulseProgress * Math.PI) * 0.28;
+
+  ctx.save();
+  ctx.translate(WIDTH / 2, HEIGHT / 2 - 58);
+  ctx.scale(scale, scale);
+  ctx.globalAlpha = fade;
+  ctx.textAlign = "center";
+  ctx.fillStyle = "#fff2a8";
+  ctx.font = "bold 34px Trebuchet MS";
+  ctx.fillText(`x${game.comboMultiplier}`, 0, 0);
+  ctx.font = "bold 15px Trebuchet MS";
+  ctx.fillStyle = "#ffd46b";
+  ctx.fillText("COMBO", 0, 22);
+  ctx.restore();
+}
+
 function drawHUD() {
   ctx.fillStyle = "rgba(0, 0, 0, 0.5)";
   ctx.fillRect(0, 0, 220, 64);
@@ -662,11 +875,11 @@ function drawHUD() {
   ctx.fillText(`STAGE: ${game.stageIndex + 1}`, 12, 20);
   ctx.fillText(`LIVES: ${game.lives}`, 12, 40);
   ctx.fillText(`ENEMIES: ${remainingEnemies}`, 110, 20);
-  ctx.fillText(`SCORE: ${game.score}`, 110, 40);
+  ctx.fillText(`CHAIN: x${game.comboMultiplier}`, 110, 40);
 }
 
 function drawOverlay() {
-  if (!(game.stageMessageTimer > 0 || game.gameOver || game.victory)) {
+  if (!(game.stageMessageTimer > 0 || game.gameOver || game.victory || !game.started)) {
     return;
   }
 
@@ -674,20 +887,38 @@ function drawOverlay() {
   ctx.fillRect(0, 0, WIDTH, HEIGHT);
   ctx.fillStyle = "#f4f1d0";
   ctx.textAlign = "center";
-  ctx.font = "bold 34px Trebuchet MS";
 
-  if (game.gameOver) {
-    ctx.fillText("GAME OVER", WIDTH / 2, HEIGHT / 2 - 10);
+  if (!game.started) {
+    ctx.font = "bold 34px Trebuchet MS";
+    ctx.fillText("TANK BATTLE", WIDTH / 2, HEIGHT / 2 - 54);
     ctx.font = "20px Trebuchet MS";
-    ctx.fillText(`FINAL SCORE: ${game.score}`, WIDTH / 2, HEIGHT / 2 + 28);
-    ctx.fillText("PRESS ENTER TO RESTART", WIDTH / 2, HEIGHT / 2 + 58);
+    ctx.fillText(`BEST SCORE: ${game.highScore}`, WIDTH / 2, HEIGHT / 2 - 12);
+    ctx.font = "18px Trebuchet MS";
+    ctx.fillText("WASD / Arrow Keys to Move", WIDTH / 2, HEIGHT / 2 + 28);
+    ctx.fillText("Space to Fire", WIDTH / 2, HEIGHT / 2 + 56);
+    ctx.fillText("Press Enter to Start", WIDTH / 2, HEIGHT / 2 + 96);
+  } else if (game.gameOver) {
+    ctx.font = "bold 34px Trebuchet MS";
+    ctx.fillText("GAME OVER", WIDTH / 2, HEIGHT / 2 - 16);
+    ctx.font = "20px Trebuchet MS";
+    ctx.fillText(`FINAL SCORE: ${game.score}`, WIDTH / 2, HEIGHT / 2 + 20);
+    ctx.fillText(`BEST SCORE: ${game.highScore}`, WIDTH / 2, HEIGHT / 2 + 48);
+    ctx.fillText("PRESS ENTER TO RESTART", WIDTH / 2, HEIGHT / 2 + 86);
   } else if (game.victory) {
-    ctx.fillText("VICTORY", WIDTH / 2, HEIGHT / 2 - 10);
+    ctx.font = "bold 34px Trebuchet MS";
+    ctx.fillText("VICTORY", WIDTH / 2, HEIGHT / 2 - 16);
     ctx.font = "20px Trebuchet MS";
-    ctx.fillText(`FINAL SCORE: ${game.score}`, WIDTH / 2, HEIGHT / 2 + 28);
-    ctx.fillText("PRESS ENTER TO RESTART", WIDTH / 2, HEIGHT / 2 + 58);
+    ctx.fillText(`FINAL SCORE: ${game.score}`, WIDTH / 2, HEIGHT / 2 + 20);
+    ctx.fillText(`BEST SCORE: ${game.highScore}`, WIDTH / 2, HEIGHT / 2 + 48);
+    ctx.fillText("PRESS ENTER TO RESTART", WIDTH / 2, HEIGHT / 2 + 86);
   } else {
-    ctx.fillText(`STAGE ${game.stageIndex + 1} CLEAR`, WIDTH / 2, HEIGHT / 2);
+    ctx.font = "bold 34px Trebuchet MS";
+    ctx.fillText(`STAGE ${game.stageIndex + 1} CLEAR`, WIDTH / 2, HEIGHT / 2 - 10);
+    ctx.font = "18px Trebuchet MS";
+    ctx.fillText(`BONUS +${1000 * (game.stageIndex + 1)}`, WIDTH / 2, HEIGHT / 2 + 28);
+    if (game.stageIndex === STAGES.length - 1) {
+      ctx.fillText("ALL CLEAR BONUS +5000", WIDTH / 2, HEIGHT / 2 + 56);
+    }
   }
 
   ctx.textAlign = "start";
@@ -703,7 +934,9 @@ function render() {
   }
 
   drawBase();
-  drawTank(game.player);
+  if (game.player) {
+    drawTank(game.player);
+  }
   for (const enemy of game.enemies) {
     drawTank(enemy);
   }
@@ -713,6 +946,8 @@ function render() {
     drawTile(tile);
   }
 
+  drawFloatingTexts();
+  drawComboIndicator();
   drawHUD();
   drawOverlay();
 }
@@ -727,5 +962,5 @@ function loop(now) {
   requestAnimationFrame(loop);
 }
 
-startNewGame();
+refreshScorePanel();
 requestAnimationFrame(loop);
